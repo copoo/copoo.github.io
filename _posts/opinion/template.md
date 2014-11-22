@@ -1,8 +1,4 @@
----
-layout: post
-title: 谈谈刚需和360影视
-category: opinion
-description: 一个看起来很简单的需求，做起来真的有那么困难吗，到底是怎么回事？
----
+#1987我不知会和你相遇#
 
+今天偶然间看了网上的一篇文，[《其实你都知道》](http://weibo.com/p/1001603768962503544907)（`卢思浩Kevin`）
 [BeiYuu]:    http://beiyuu.com  "BeiYuu"
