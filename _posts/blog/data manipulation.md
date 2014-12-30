@@ -248,8 +248,112 @@ No.|hbase_column_name| database_column_name
 SS损失电量计算
 -
 
-	select ss.reason,ss.ss_group_id,ss.wtg_alias,ss.sc_starttime,ss.sc_endtime,sum(point.ap) from (select ss_group_id,wtg_alias,from_unixtime(unix_timestamp(concat(substr(sc_starttime,1,19),'.',substr(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')) sc_starttime,lead(from_unixtime(unix_timestamp(concat(substr(sc_starttime,1,19),'.',substr(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')))  over (partition by wtg_alias order by sc_starttime) sc_endtime,reason from hbase_ss_t) ss  join (
-	select wtg_code,wtg_alias,DATATIME_UTC,from_unixtime(unix_timestamp(DATATIME_UTC, 'MMddyyyyHHmmss')) as min10,lead(APPRODUCTION) over (partition by wtg_code order by from_unixtime(unix_timestamp(DATATIME_UTC,'MMddyyyyHHmmss'))) - APPRODUCTION as ap from hbase_point10m_t) point on (point.wtg_alias = ss.wtg_alias)
-	where (ss.sc_endtime > minis_mins(point.DATATIME_UTC,10) 
-	and ss.sc_starttime <= point.min10)
-	group by ss.reason,ss.ss_group_id,ss.wtg_alias,ss.sc_starttime,ss.sc_endtime;
+	insert OVERWRITE table eba_factor  select reason,ss_group_id,wtg_alias,sc_starttime,sc_endtime,sum(prod) from (select ss.*, point.prod from (select ss_group_id,wtg_alias, from_unixtime(unix_timestamp(concat(substr(sc_starttime,1,19),'.',substr(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')) sc_starttime, lead(from_unixtime(unix_timestamp(concat(substr(sc_starttime,1,19),'.',substr(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')))  over (partition by wtg_alias order by sc_starttime) sc_endtime, reason from hbase_ss) ss join ( select wtg_code, wtg_alias, DATATIME_UTC, from_unixtime(unix_timestamp(DATATIME_UTC, 'MMddyyyyHHmmss')) as min10,lead(APPRODUCTION) over (partition by wtg_code order by from_unixtime(unix_timestamp(DATATIME_UTC,'MMddyyyyHHmmss'))) - APPRODUCTION as prod from hbase_point10m) point on (point.wtg_alias = ss.wtg_alias) where ss.sc_endtime > minus_mins(point.DATATIME_UTC,10) and ss.sc_starttime <= point.min10 and ss_group_id in (70,71,72) union all  select ss.*,REV.prod from (select ss_group_id,wtg_alias,from_unixtime(unix_timestamp(concat(substr(sc_starttime,1,19),'.',substr(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')) sc_starttime, lead(from_unixtime(unix_timestamp(concat(substr(sc_starttime,1,19),'.',substr(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')))  over (partition by wtg_alias order by sc_starttime) sc_endtime, reason from hbase_ss) ss join ( select point.wtg_code, point.wtg_alias, point.DATATIME_UTC,point.min10,tpc.POWER_AT_WIND_SPEED_RANK - ap as prod from ( select wtg_code, wtg_alias, DATATIME_UTC, READWINDSPEEDAVE, from_unixtime(unix_timestamp(DATATIME_UTC, 'MMddyyyyHHmmss')) as min10,lead(APPRODUCTION) over (partition by wtg_code order by from_unixtime(unix_timestamp(DATATIME_UTC,'MMddyyyyHHmmss'))) - APPRODUCTION as ap from hbase_point10m) point  join wtg on point.wtg_code = wtg.wtg_code  join tpc on (tpc.WIND_SPEED_RANK = round(point.READWINDSPEEDAVE*2)/2  and tpc.farm_id = wtg.farm_id  and tpc.wtg_type_id = wtg.wtg_type_id) ) REV on (REV.wtg_alias = ss.wtg_alias) where (ss.sc_endtime > minus_mins(REV.DATATIME_UTC,10) and ss.sc_starttime <= REV.min10  and ss_group_id not in (70,71,72)) ) ta group by reason,ss_group_id,wtg_alias,sc_starttime,sc_endtime;
+		
+	
+	create table eba_factor(
+	reason string,
+	ss_group_id int,
+	wtg_alias string,
+	sc_starttime string,
+	sc_endtime string,
+	revenue float
+	)
+	COMMENT 'eba_factor RECORD';
+
+ 
+
+
+
+
+hive 导入外表时，忽略第一行
+-
+	Create external table testtable (name string, message string) row format delimited fields terminated by '\t' lines terminated by '\n' location '/testtable' tblproperties ("skip.header.line.count"="1");
+	
+
+分步计算ss损失：
+-
+point_temp
+
+	create table point_temp(
+	wtg_code string,
+	wtg_alias string,
+	DATATIME_UTC string,
+	WINDSPEEDAVE DECIMAL(22,6),
+	min10 string,
+	prod DECIMAL(22,6)
+	)
+	COMMENT 'point_temp RECORD';
+	insert overwrite table point_temp
+	SELECT wtg_code,wtg_alias,DATATIME_UTC,WINDSPEEDAVE,from_unixtime(unix_timestamp(DATATIME_UTC, 'MMddyyyyHHmmss'))AS min10,lead(APPRODUCTION) over (partition BY wtg_code order by from_unixtime(unix_timestamp(DATATIME_UTC,'MMddyyyyHHmmss'))) - APPRODUCTION AS prod FROM hbase_point10m_t where APPRODUCTION is not NULL union all SELECT wtg_code,wtg_alias,DATATIME_UTC,WINDSPEEDAVE,from_unixtime(unix_timestamp(DATATIME_UTC, 'MMddyyyyHHmmss'))AS min10,0 AS prod FROM hbase_point10m_t where APPRODUCTION is  NULL;
+	
+tap
+
+	create table tap(
+	wtg_code string,
+	wtg_alias string,
+	DATATIME_UTC string,
+	min10 string,
+	tp DECIMAL(22,6),
+	ap DECIMAL(22,6)
+	)
+	COMMENT 'tap RECORD';
+	
+	insert overwrite table tap select  point_temp.wtg_code,point_temp.wtg_alias,point_temp.DATATIME_UTC,point_temp.min10,tpc.POWER_AT_WIND_SPEED_RANK/6  as tp,prod as ap  from point_temp   JOIN wtg ON point_temp.wtg_code = wtg.wtg_code JOIN tpc ON (tpc.WIND_SPEED_RANK = ROUND(point_temp.WINDSPEEDAVE*2)/2 AND tpc.farm_id = wtg.farm_id AND tpc.wtg_type_id = wtg.wtg_type_id and group_rank='TPC_STD');
+	
+ss_t
+
+	create table ss_t(
+	ss_group_id string,
+	wtg_alias string,
+	sc_starttime string,
+	sc_endtime string,
+	reason string
+	)
+	COMMENT 'ss_t RECORD';
+	insert overwrite table ss_t select ss_group_id,
+	wtg_alias,
+	from_unixtime(unix_timestamp(concat(SUBSTR(sc_starttime,1,19),'.',SUBSTR(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS')) sc_starttime,
+	lead(from_unixtime(unix_timestamp(concat(SUBSTR(sc_starttime,1,19),'.',SUBSTR(sc_starttime,21,3)),'yyyy-MM-dd HH:mm:ss.SSS'))) over (partition BY wtg_alias order by sc_starttime) sc_endtime,
+	reason   from hbase_ss_t;
+
+point_ss
+
+	create table point_ss(
+	ss_group_id string,
+	wtg_alias string,
+	sc_starttime string,
+	sc_endtime string,
+	reason string,
+	net_ap DECIMAL(22,6)
+	)
+	COMMENT 'point_ss RECORD';
+	
+	
+	insert overwrite table point_ss  SELECT ss_group_id,
+	ss_t.wtg_alias,
+	sc_starttime,
+	sc_endtime,
+	reason,
+	tap.tp - tap.ap 
+	FROM ss_t  join tap on (tap.wtg_alias = ss_t.wtg_alias) WHERE ss_t.sc_endtime>str_to_date(minus_mins(tap.DATATIME_UTC,10),'MMddyyyyHHmmss')  AND ss_t.sc_starttime<= tap.min10 AND ss_group_id NOT  IN (70,71,72) union all SELECT ss_group_id,
+	ss_t.wtg_alias,
+	sc_starttime,
+	sc_endtime,
+	reason,tap.ap FROM ss_t join tap on (tap.wtg_alias = ss_t.wtg_alias) WHERE ss_t.sc_endtime> str_to_date(minus_mins(tap.DATATIME_UTC,10),'MMddyyyyHHmmss')  AND ss_t.sc_starttime<= tap.min10 AND ss_group_id  IN (70,71,72);
+	
+	
+point_ss_sum
+
+	create table point_ss_sum(
+	reason string,
+	ss_group_id string,
+	wtg_alias string,
+	sc_starttime string,
+	sc_endtime string,
+	net_ap_sum DECIMAL(22,6)
+	)
+	COMMENT 'point_ss_sum RECORD';
+	
+	insert overwrite table point_ss_sum
+	select reason,ss_group_id,wtg_alias,sc_starttime,sc_endtime,sum(net_ap) from point_ss group by reason,ss_group_id,wtg_alias,sc_starttime,sc_endtime;
